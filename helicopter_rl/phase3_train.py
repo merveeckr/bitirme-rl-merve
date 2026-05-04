@@ -62,7 +62,7 @@ PPO_KWARGS = dict(
     gamma         = 0.99,
     gae_lambda    = 0.95,
     clip_range    = 0.2,
-    ent_coef      = 0.005,
+    ent_coef      = 0.02,
     vf_coef       = 0.5,
     max_grad_norm = 0.5,
     verbose       = 1,
@@ -71,9 +71,9 @@ PPO_KWARGS = dict(
 
 # Curriculum stages (n_obstacles, wind_strength_max, randomize_radius)
 CURRICULUM_STAGES = [
-    {"n_obstacles": 2, "wind_strength_max": 4.0, "randomize_radius": False, "timesteps": 400_000},
-    {"n_obstacles": 3, "wind_strength_max": 6.0, "randomize_radius": True,  "timesteps": 400_000},
-    {"n_obstacles": 5, "wind_strength_max": 8.0, "randomize_radius": True,  "timesteps": 400_000},
+    {"n_obstacles": 2, "wind_strength_max": 4.0, "randomize_radius": False, "timesteps": 600_000},
+    {"n_obstacles": 3, "wind_strength_max": 6.0, "randomize_radius": True,  "timesteps": 600_000},
+    {"n_obstacles": 5, "wind_strength_max": 8.0, "randomize_radius": True,  "timesteps": 600_000},
 ]
 
 
@@ -152,7 +152,8 @@ def train(
     for src in [f"{MODEL_DIR_P2}/best_model", f"{MODEL_DIR_P2}/ppo_phase2_final"]:
         if os.path.exists(src + ".zip"):
             print(f"  ↳ Loading Phase 2 weights from {src}.zip")
-            model = PPO.load(src, env=train_env, **PPO_KWARGS)
+            load_kw = {k: v for k, v in PPO_KWARGS.items() if k != 'policy_kwargs'}
+            model = PPO.load(src, env=train_env, **load_kw)
             break
     else:
         print("  ↳ No Phase 2 model found – training from scratch")
@@ -249,7 +250,7 @@ def train_curriculum(n_envs: int = 4):
 
         if prev_save and os.path.exists(prev_save + ".zip"):
             print(f"\n  Stage {stage_name}: loading weights from {prev_save}.zip")
-            kw = dict(PPO_KWARGS)
+            kw = {k: v for k, v in PPO_KWARGS.items() if k != 'policy_kwargs'}
             kw["verbose"] = 1
             model = PPO.load(prev_save, env=train_env, **kw)
         else:

@@ -248,9 +248,14 @@ class ObstacleHelicopterEnv(FlightControlEnv3D):
             factor = (self.safety_margin - min_surf) / self.safety_margin
             reward = -50.0 * (factor ** 2)
             info["near_obstacle"] = True
+            # Time penalty for lingering near obstacle — breaks spiral behaviour
+            linger_factor = 1.0 - (min_surf / self.safety_margin)
+            reward -= 0.3 * linger_factor
         elif min_surf < self.safety_margin * 2.0:
             # Small reward for flying safely near (but not too close to) obstacle
             reward = 0.3
+            # Mild time nudge to keep moving through the safe band
+            reward -= 0.05 * (1.0 - min_surf / (self.safety_margin * 2.0))
 
         return reward, terminated, info
 
