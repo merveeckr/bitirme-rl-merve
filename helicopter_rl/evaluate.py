@@ -16,6 +16,7 @@ Kullanım:
 import argparse
 import os
 import sys
+from typing import Optional
 
 import numpy as np
 import matplotlib
@@ -28,6 +29,7 @@ import matplotlib.patches as mpatches
 from matplotlib.cm import get_cmap
 
 from stable_baselines3 import PPO
+from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from helicopter_rl.envs.base_env import FlightControlEnv3D
@@ -39,7 +41,7 @@ FIGURES_DIR = "figures"
 # Model loader
 # ─────────────────────────────────────────────────────────────────────────
 
-def load_model(phase: int):
+def load_model_path(phase: int):
     candidates = {
         1: ["models/phase1/best_model", "models/phase1/ppo_phase1_final"],
         2: ["models/phase2/best_model", "models/phase2/ppo_phase2_final"],
@@ -48,7 +50,7 @@ def load_model(phase: int):
     }
     for path in candidates.get(phase, []):
         if os.path.exists(path + ".zip"):
-            return PPO.load(path)
+            return path
     raise FileNotFoundError(f"No trained model for Phase {phase}. Run phase{phase}_train.py --train first.")
 
 
@@ -69,22 +71,44 @@ def make_env(phase: int, n_obstacles: int = 4):
         )
 
 
+def make_eval_vec_env(phase: int, n_obstacles: int = 4, model_path: Optional[str] = None):
+    raw_env = make_env(phase, n_obstacles=n_obstacles)
+    vec_env = DummyVecEnv([lambda: raw_env])
+
+    vec_candidates = [f"models/phase{phase}/vec_normalize.pkl"]
+    if model_path:
+        vec_candidates.insert(0, f"{os.path.dirname(model_path)}/vec_normalize.pkl")
+
+    for vec_path in vec_candidates:
+        if os.path.exists(vec_path):
+            vec_env = VecNormalize.load(vec_path, vec_env)
+            vec_env.training = False
+            vec_env.norm_reward = False
+            print(f"  Loaded normalization stats: {vec_path}")
+            return vec_env, raw_env
+
+    print("  [!] vec_normalize.pkl not found, evaluating without normalization.")
+    return vec_env, raw_env
+
+
 # ─────────────────────────────────────────────────────────────────────────
 # Run one evaluation
 # ─────────────────────────────────────────────────────────────────────────
 
 def run_evaluation(phase: int, n_episodes: int = 5, n_obstacles: int = 4):
-    model = load_model(phase)
-    env   = make_env(phase, n_obstacles=n_obstacles)
+    model_path = load_model_path(phase)
+    print(f"  Loading model: {model_path}.zip")
+    model = PPO.load(model_path)
+    eval_env, raw_env = make_eval_vec_env(phase, n_obstacles=n_obstacles, model_path=model_path)
 
     trajectories, targets, starts, obs_list = [], [], [], []
     results = []
 
     for ep in range(n_episodes):
-        obs_vec, _ = env.reset()
-        starts.append(env.pos.copy())
-        targets.append(env.target.copy())
-        ep_obstacles = env.get_obstacles() if hasattr(env, "get_obstacles") else []
+        obs_vec = eval_env.reset()
+        starts.append(raw_env.pos.copy())
+        targets.append(raw_env.target.copy())
+        ep_obstacles = raw_env.get_obstacles() if hasattr(raw_env, "get_obstacles") else []
 
         done = False
         total_r, min_dist = 0.0, float("inf")
@@ -92,25 +116,27 @@ def run_evaluation(phase: int, n_episodes: int = 5, n_obstacles: int = 4):
 
         while not done:
             action, _ = model.predict(obs_vec, deterministic=True)
-            obs_vec, r, terminated, truncated, info = env.step(action)
+            obs_vec, reward_arr, done_arr, info_arr = eval_env.step(action)
+            r = float(reward_arr[0])
+            info = info_arr[0]
             total_r += r
             step_rewards.append(r)
-            done = terminated or truncated
-            if hasattr(env, "_obstacle_distances"):
-                md, _ = env._obstacle_distances()
+            done = bool(done_arr[0])
+            if hasattr(raw_env, "_obstacle_distances"):
+                md, _ = raw_env._obstacle_distances()
                 min_dist = min(min_dist, md)
 
         results.append({
             "ep":           ep + 1,
             "reward":       total_r,
-            "final_dist":   float(np.linalg.norm(env.target - env.pos)),
+            "final_dist":   float(np.linalg.norm(raw_env.target - raw_env.pos)),
             "success":      info.get("success",   False),
             "collision":    info.get("collision",  False),
             "min_obs_dist": min_dist,
-            "steps":        env.step_count,
+            "steps":        raw_env.step_count,
             "step_rewards": step_rewards,
         })
-        trajectories.append(env.get_trajectory())
+        trajectories.append(raw_env.get_trajectory())
         obs_list.append(ep_obstacles)
 
     return results, trajectories, targets, starts, obs_list

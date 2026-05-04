@@ -156,20 +156,28 @@ def evaluate(model_path: str = FINAL_ZIP, n_episodes: int = 5):
     print(f"Loading model: {model_path}.zip")
     model = PPO.load(model_path)
 
-    env = ObstacleHelicopterEnv(
+    raw_env = ObstacleHelicopterEnv(
         n_obstacles=1, obstacle_radius=15.0,
         obstacle_height=120.0, safety_margin=25.0,
         max_steps=1200, wind_strength_max=4.0,
     )
+    eval_env = DummyVecEnv([lambda: raw_env])
+    if os.path.exists(VEC_NORM):
+        eval_env = VecNormalize.load(VEC_NORM, eval_env)
+        eval_env.training = False
+        eval_env.norm_reward = False
+        print(f"Loaded normalization stats: {VEC_NORM}")
+    else:
+        print(f"[!] vec normalize not found at {VEC_NORM}, evaluating without normalization.")
 
     trajectories, targets, starts, all_obstacles = [], [], [], []
     results = []
 
     for ep in range(n_episodes):
-        obs, _ = env.reset()
-        starts.append(env.pos.copy())
-        targets.append(env.target.copy())
-        all_obstacles.append(list(env.get_obstacles()))
+        obs = eval_env.reset()
+        starts.append(raw_env.pos.copy())
+        targets.append(raw_env.target.copy())
+        all_obstacles.append(list(raw_env.get_obstacles()))
 
         done = False
         total_r = 0.0
@@ -177,15 +185,17 @@ def evaluate(model_path: str = FINAL_ZIP, n_episodes: int = 5):
 
         while not done:
             action, _ = model.predict(obs, deterministic=True)
-            obs, r, terminated, truncated, info = env.step(action)
+            obs, reward_arr, done_arr, info_arr = eval_env.step(action)
+            r = float(reward_arr[0])
+            info = info_arr[0]
             total_r += r
-            done = terminated or truncated
-            md, _ = env._obstacle_distances()
+            done = bool(done_arr[0])
+            md, _ = raw_env._obstacle_distances()
             min_dist = min(min_dist, md)
 
-        traj = env.get_trajectory()
+        traj = raw_env.get_trajectory()
         trajectories.append(traj)
-        final_dist = float(np.linalg.norm(env.target - env.pos))
+        final_dist = float(np.linalg.norm(raw_env.target - raw_env.pos))
         success   = info.get("success",   False)
         collision = info.get("collision",  False)
         results.append({"ep": ep + 1, "reward": total_r,

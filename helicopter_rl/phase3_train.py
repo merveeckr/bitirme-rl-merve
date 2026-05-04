@@ -291,6 +291,7 @@ def train_curriculum(n_envs: int = 4):
 
     # Final save
     model.save(FINAL_ZIP)
+    train_env.save(VEC_NORM)
     print(f"\n✓ Curriculum complete. Final model → {FINAL_ZIP}.zip")
     return model
 
@@ -315,7 +316,7 @@ def evaluate(
     print(f"Loading model: {model_path}.zip")
     model = PPO.load(model_path)
 
-    env = ObstacleHelicopterEnv(
+    raw_env = ObstacleHelicopterEnv(
         n_obstacles       = n_obstacles,
         obstacle_radius   = 15.0,
         obstacle_height   = 120.0,
@@ -324,16 +325,25 @@ def evaluate(
         max_steps         = 1500,
         wind_strength_max = 7.0,
     )
+    eval_env = DummyVecEnv([lambda: raw_env])
+    vec_norm_path = VEC_NORM if os.path.exists(VEC_NORM) else f"{MODEL_DIR}/stage_3C/vec_normalize.pkl"
+    if os.path.exists(vec_norm_path):
+        eval_env = VecNormalize.load(vec_norm_path, eval_env)
+        eval_env.training = False
+        eval_env.norm_reward = False
+        print(f"Loaded normalization stats: {vec_norm_path}")
+    else:
+        print("[!] vec normalize not found, evaluating without normalization.")
 
     trajectories, targets, starts = [], [], []
     all_obstacles_last = []
     results = []
 
     for ep in range(n_episodes):
-        obs, _ = env.reset()
-        starts.append(env.pos.copy())
-        targets.append(env.target.copy())
-        ep_obstacles = list(env.get_obstacles())
+        obs = eval_env.reset()
+        starts.append(raw_env.pos.copy())
+        targets.append(raw_env.target.copy())
+        ep_obstacles = list(raw_env.get_obstacles())
 
         done = False
         total_r = 0.0
@@ -341,15 +351,17 @@ def evaluate(
 
         while not done:
             action, _ = model.predict(obs, deterministic=True)
-            obs, r, terminated, truncated, info = env.step(action)
+            obs, reward_arr, done_arr, info_arr = eval_env.step(action)
+            r = float(reward_arr[0])
+            info = info_arr[0]
             total_r += r
-            done = terminated or truncated
-            md, _ = env._obstacle_distances()
+            done = bool(done_arr[0])
+            md, _ = raw_env._obstacle_distances()
             min_dist = min(min_dist, md)
 
-        traj = env.get_trajectory()
+        traj = raw_env.get_trajectory()
         trajectories.append(traj)
-        final_dist = float(np.linalg.norm(env.target - env.pos))
+        final_dist = float(np.linalg.norm(raw_env.target - raw_env.pos))
         success   = info.get("success",   False)
         collision = info.get("collision",  False)
         results.append({

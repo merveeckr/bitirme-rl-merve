@@ -139,27 +139,37 @@ def evaluate(model_path: str = FINAL_ZIP, n_episodes: int = 5):
     print(f"Loading model: {model_path}.zip")
     model = PPO.load(model_path)
 
-    env = FlightControlEnv3D(max_steps=1000)
+    raw_env = FlightControlEnv3D(max_steps=1000)
+    eval_env = DummyVecEnv([lambda: raw_env])
+    if os.path.exists(VEC_NORM):
+        eval_env = VecNormalize.load(VEC_NORM, eval_env)
+        eval_env.training = False
+        eval_env.norm_reward = False
+        print(f"Loaded normalization stats: {VEC_NORM}")
+    else:
+        print(f"[!] vec normalize not found at {VEC_NORM}, evaluating without normalization.")
 
     trajectories, targets, starts = [], [], []
     results = []
 
     for ep in range(n_episodes):
-        obs, _ = env.reset()
-        starts.append(env.pos.copy())
-        targets.append(env.target.copy())
+        obs = eval_env.reset()
+        starts.append(raw_env.pos.copy())
+        targets.append(raw_env.target.copy())
 
         done = False
         total_r = 0.0
         while not done:
             action, _ = model.predict(obs, deterministic=True)
-            obs, r, terminated, truncated, info = env.step(action)
+            obs, reward_arr, done_arr, info_arr = eval_env.step(action)
+            r = float(reward_arr[0])
+            info = info_arr[0]
             total_r += r
-            done = terminated or truncated
+            done = bool(done_arr[0])
 
-        traj = env.get_trajectory()
+        traj = raw_env.get_trajectory()
         trajectories.append(traj)
-        final_dist = float(np.linalg.norm(env.target - env.pos))
+        final_dist = float(np.linalg.norm(raw_env.target - raw_env.pos))
         success = info.get("success", False)
         results.append({"ep": ep + 1, "reward": total_r,
                         "final_dist": final_dist, "success": success})
