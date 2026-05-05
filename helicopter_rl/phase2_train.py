@@ -217,17 +217,92 @@ def evaluate(model_path: str = FINAL_ZIP, n_episodes: int = 5):
 # Entry point
 # ─────────────────────────────────────────────────────────────────────────
 
+def train_2obs(total_timesteps: int = 600_000, n_envs: int = 4):
+    """
+    Phase 2 modelini 2 engelle ince ayar yapar.
+    Önce Phase 2 (1 engel) modelini yükler, 2 engelle eğitmeye devam eder.
+    """
+    MODEL_DIR_2OBS = "models/phase2_2obs"
+    LOG_DIR_2OBS   = "logs/phase2_2obs"
+    os.makedirs(MODEL_DIR_2OBS, exist_ok=True)
+    os.makedirs(LOG_DIR_2OBS,   exist_ok=True)
+
+    def _make_2obs_env():
+        env = ObstacleHelicopterEnv(
+            n_obstacles=2, obstacle_radius=15.0,
+            obstacle_height=120.0, safety_margin=25.0,
+            max_steps=1300, wind_strength_max=5.0,
+        )
+        return Monitor(env, LOG_DIR_2OBS)
+
+    train_env = DummyVecEnv([_make_2obs_env] * n_envs)
+    train_env = VecNormalize(train_env, norm_obs=True, norm_reward=True, clip_obs=10.0)
+
+    eval_env = DummyVecEnv([_make_2obs_env])
+    eval_env = VecNormalize(eval_env, norm_obs=True, norm_reward=False,
+                            clip_obs=10.0, training=False)
+
+    # Transfer: Phase 2 (1 obs) → 2 obs fine-tune
+    for src in [f"{MODEL_DIR}/best_model", f"{MODEL_DIR}/ppo_phase2_final"]:
+        if os.path.exists(src + ".zip"):
+            print(f"  ↳ Phase 2 ağırlıkları yükleniyor: {src}.zip")
+            kw = {k: v for k, v in PPO_KWARGS.items() if k != "policy_kwargs"}
+            kw["learning_rate"] = 1e-4
+            kw["ent_coef"]      = 0.01
+            model = PPO.load(src, env=train_env, **kw)
+            break
+    else:
+        raise FileNotFoundError("Phase 2 modeli bulunamadı. Önce --train çalıştır.")
+
+    callbacks = CallbackList([
+        EvalCallback(
+            eval_env,
+            best_model_save_path=MODEL_DIR_2OBS,
+            log_path=LOG_DIR_2OBS,
+            eval_freq=max(10_000 // n_envs, 1),
+            n_eval_episodes=10,
+            deterministic=True,
+            verbose=1,
+        ),
+        CheckpointCallback(
+            save_freq=max(100_000 // n_envs, 1),
+            save_path=MODEL_DIR_2OBS,
+            name_prefix="ppo_p2_2obs",
+        ),
+    ])
+
+    print("=" * 60)
+    print("PHASE 2 → 2 ENGEL İNCE AYAR")
+    print(f"  Timesteps : {total_timesteps:,}")
+    print(f"  LR        : 1e-4  |  ent_coef: 0.01")
+    print("=" * 60)
+
+    model.learn(total_timesteps=total_timesteps, callback=callbacks,
+                progress_bar=True, reset_num_timesteps=True)
+
+    final = f"{MODEL_DIR_2OBS}/ppo_p2_2obs_final"
+    model.save(final)
+    train_env.save(f"{MODEL_DIR_2OBS}/vec_normalize.pkl")
+    print(f"\n✓ 2-engel modeli kaydedildi: {final}.zip")
+    return model
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Phase 2: Single Obstacle Avoidance")
-    parser.add_argument("--train",     action="store_true")
-    parser.add_argument("--eval",      action="store_true")
-    parser.add_argument("--timesteps", type=int, default=800_000)
-    parser.add_argument("--n_envs",    type=int, default=4)
-    parser.add_argument("--episodes",  type=int, default=5)
+    parser.add_argument("--train",      action="store_true")
+    parser.add_argument("--train2obs",  action="store_true",
+                        help="Phase 2 modelini 2 engelle ince ayarla")
+    parser.add_argument("--eval",       action="store_true")
+    parser.add_argument("--timesteps",  type=int, default=800_000)
+    parser.add_argument("--n_envs",     type=int, default=4)
+    parser.add_argument("--episodes",   type=int, default=5)
     args = parser.parse_args()
 
     if args.train:
         train(total_timesteps=args.timesteps, n_envs=args.n_envs)
 
-    if args.eval or not args.train:
+    if args.train2obs:
+        train_2obs(n_envs=args.n_envs)
+
+    if args.eval or not (args.train or args.train2obs):
         evaluate(n_episodes=args.episodes)
