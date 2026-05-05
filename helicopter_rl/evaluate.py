@@ -53,12 +53,12 @@ def load_model(phase: int):
     raise FileNotFoundError(f"No trained model for Phase {phase}. Run phase{phase}_train.py --train first.")
 
 
-def make_env(phase: int, n_obstacles: int = 4):
+def make_env(phase: int, n_obstacles: int = 1):
     if phase == 1:
         return FlightControlEnv3D(max_steps=1000, wind_strength_max=3.0)
     elif phase == 2:
         return ObstacleHelicopterEnv(
-            n_obstacles=1, obstacle_radius=15.0,
+            n_obstacles=n_obstacles, obstacle_radius=15.0,
             obstacle_height=120.0, safety_margin=25.0,
             max_steps=1200, wind_strength_max=4.0,
         )
