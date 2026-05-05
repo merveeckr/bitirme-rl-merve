@@ -405,6 +405,170 @@ def animate_episode(phase: int = 2, n_obstacles: int = 2, interval: int = 40,
 
 
 # ─────────────────────────────────────────────────────────────────────────
+# Interactive Plotly animation (rotatable 3D)
+# ─────────────────────────────────────────────────────────────────────────
+
+def animate_episode_plotly(phase: int = 2, n_obstacles: int = 2, save_path: str = None):
+    """
+    Döndürülebilir interaktif 3D Plotly animasyonu.
+
+    Colab:  fig = animate_episode_plotly(2, 2); fig.show()
+    CLI:    python evaluate.py --plotly --phase 2 --n_obs 2
+            → figures/phase2_n2_interactive.html
+    """
+    try:
+        import plotly.graph_objects as go
+    except ImportError:
+        print("Plotly kurulu değil → !pip install plotly")
+        return None
+
+    model     = load_model(phase)
+    env       = make_env(phase, n_obstacles=n_obstacles)
+    obs_vec, _ = env.reset()
+    start     = env.pos.copy()
+    target    = env.target.copy()
+    obstacles = env.get_obstacles() if hasattr(env, "get_obstacles") else []
+
+    positions = [env.pos.copy()]
+    done = False
+    while not done:
+        action, _ = model.predict(obs_vec, deterministic=True)
+        obs_vec, _, terminated, truncated, info = env.step(action)
+        positions.append(env.pos.copy())
+        done = terminated or truncated
+
+    traj   = np.array(positions)
+    status = ("✓ ULAŞTI" if info.get("success")
+              else "✗ ÇARPIŞMA" if info.get("collision")
+              else "✗ süre doldu")
+    print(f"Sonuç: {status}  |  adım: {len(traj)}  |  "
+          f"son mesafe: {np.linalg.norm(env.target - env.pos):.1f}m")
+
+    step_size   = max(1, len(traj) // 250)
+    traj_frames = traj[::step_size]
+
+    # ── Sabit izler (engeller + başlangıç + hedef) ──────────────────────
+    base_traces = []
+
+    for obs in obstacles:
+        cx, cy = obs["pos"][0], obs["pos"][1]
+        r, h   = obs["radius"], obs["height"]
+        theta  = np.linspace(0, 2 * np.pi, 36)
+        zz     = np.linspace(0, h, 12)
+        T, Z   = np.meshgrid(theta, zz)
+        base_traces.append(go.Surface(
+            x=cx + r * np.cos(T), y=cy + r * np.sin(T), z=Z,
+            colorscale=[[0, "crimson"], [1, "crimson"]],
+            opacity=0.35, showscale=False,
+            name="Engel", hoverinfo="skip",
+        ))
+
+    base_traces.append(go.Scatter3d(
+        x=[start[0]],  y=[start[1]],  z=[start[2]],
+        mode="markers",
+        marker=dict(size=10, color="lime", symbol="circle",
+                    line=dict(color="darkgreen", width=1)),
+        name="Başlangıç",
+    ))
+    base_traces.append(go.Scatter3d(
+        x=[target[0]], y=[target[1]], z=[target[2]],
+        mode="markers",
+        marker=dict(size=14, color="gold", symbol="diamond",
+                    line=dict(color="darkorange", width=1)),
+        name="Hedef",
+    ))
+
+    n_base = len(base_traces)
+
+    # İlk animasyonlu izler (yol çizgisi + helikopter noktası)
+    base_traces.append(go.Scatter3d(
+        x=[], y=[], z=[],
+        mode="lines",
+        line=dict(color="royalblue", width=4),
+        name="Uçuş yolu",
+    ))
+    base_traces.append(go.Scatter3d(
+        x=[traj_frames[0, 0]], y=[traj_frames[0, 1]], z=[traj_frames[0, 2]],
+        mode="markers",
+        marker=dict(size=12, color="deepskyblue", symbol="circle",
+                    line=dict(color="navy", width=2)),
+        name="Helikopter",
+    ))
+
+    # ── Animasyon kareleri ───────────────────────────────────────────────
+    frames = [
+        go.Frame(
+            data=[
+                go.Scatter3d(
+                    x=traj_frames[:i + 1, 0],
+                    y=traj_frames[:i + 1, 1],
+                    z=traj_frames[:i + 1, 2],
+                    mode="lines",
+                    line=dict(color="royalblue", width=4),
+                ),
+                go.Scatter3d(
+                    x=[traj_frames[i, 0]],
+                    y=[traj_frames[i, 1]],
+                    z=[traj_frames[i, 2]],
+                    mode="markers",
+                    marker=dict(size=12, color="deepskyblue", symbol="circle",
+                                line=dict(color="navy", width=2)),
+                ),
+            ],
+            traces=[n_base, n_base + 1],
+            name=str(i),
+        )
+        for i in range(len(traj_frames))
+    ]
+
+    fig = go.Figure(
+        data=base_traces,
+        frames=frames,
+        layout=go.Layout(
+            title=dict(text=f"Faz {phase} — {n_obstacles} Engel — {status}",
+                       font=dict(size=16)),
+            scene=dict(
+                xaxis_title="X [m]",
+                yaxis_title="Y [m]",
+                zaxis_title="Yükseklik [m]",
+                aspectmode="data",
+            ),
+            updatemenus=[dict(
+                type="buttons", showactive=False,
+                y=0.02, x=0.5, xanchor="center",
+                buttons=[
+                    dict(label="▶ Oynat", method="animate",
+                         args=[None, dict(frame=dict(duration=50, redraw=True),
+                                          fromcurrent=True, mode="immediate")]),
+                    dict(label="⏸ Durdur", method="animate",
+                         args=[[None], dict(frame=dict(duration=0, redraw=False),
+                                            mode="immediate")]),
+                ],
+            )],
+            sliders=[dict(
+                steps=[dict(
+                    args=[[str(i)], dict(mode="immediate",
+                                         frame=dict(duration=50, redraw=True))],
+                    method="animate",
+                    label=str(i * step_size),
+                ) for i in range(len(traj_frames))],
+                active=0, y=0, x=0.05, len=0.9,
+                currentvalue=dict(prefix="Adım: ", visible=True, xanchor="center"),
+            )],
+        ),
+    )
+
+    if save_path:
+        os.makedirs(FIGURES_DIR, exist_ok=True)
+        html_path = save_path if save_path.endswith(".html") else save_path + ".html"
+        fig.write_html(html_path, include_plotlyjs="cdn")
+        print(f"  → İnteraktif animasyon: {html_path}")
+        print(f"  → Tarayıcıda aç → ▶ Oynat → fare ile döndür")
+
+    return fig
+
+
+# ─────────────────────────────────────────────────────────────────────────
 # Entry point
 # ─────────────────────────────────────────────────────────────────────────
 
@@ -413,7 +577,8 @@ if __name__ == "__main__":
     parser.add_argument("--phase",    type=int, default=2, choices=[1, 2, 3])
     parser.add_argument("--all",      action="store_true", help="Evaluate all phases")
     parser.add_argument("--demo",     action="store_true", help="Quick demo (3 eps each)")
-    parser.add_argument("--animate",  action="store_true", help="Tek bölüm animasyonu üret")
+    parser.add_argument("--animate",  action="store_true", help="Matplotlib HTML animasyonu")
+    parser.add_argument("--plotly",   action="store_true", help="İnteraktif Plotly animasyonu (döndürülebilir)")
     parser.add_argument("--gif",      action="store_true", help="HTML yerine GIF kaydet")
     parser.add_argument("--episodes", type=int, default=5)
     parser.add_argument("--n_obs",    type=int, default=2,  help="Test edilecek engel sayısı")
@@ -444,16 +609,18 @@ if __name__ == "__main__":
         if len(results_all) > 1:
             plot_stats(results_all)
 
+    elif args.plotly:
+        save = os.path.join(FIGURES_DIR,
+                            f"phase{args.phase}_n{args.n_obs}_interactive.html")
+        animate_episode_plotly(phase=args.phase, n_obstacles=args.n_obs,
+                               save_path=save)
+
     elif args.animate:
         ext  = ".gif" if args.gif else ".html"
         name = f"phase{args.phase}_n{args.n_obs}_obs{ext}"
         save = os.path.join(FIGURES_DIR, name)
-        animate_episode(
-            phase      = args.phase,
-            n_obstacles= args.n_obs,
-            interval   = args.interval,
-            save_path  = save,
-        )
+        animate_episode(phase=args.phase, n_obstacles=args.n_obs,
+                        interval=args.interval, save_path=save)
 
     else:
         evaluate_phase(args.phase, n_episodes=args.episodes, n_obstacles=args.n_obs)
