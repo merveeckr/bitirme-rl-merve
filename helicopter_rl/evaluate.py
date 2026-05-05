@@ -26,6 +26,7 @@ from matplotlib.gridspec import GridSpec
 from matplotlib.lines import Line2D
 import matplotlib.patches as mpatches
 from matplotlib.cm import get_cmap
+from matplotlib.animation import FuncAnimation
 
 from stable_baselines3 import PPO
 
@@ -307,11 +308,14 @@ def evaluate_phase(phase: int, n_episodes: int = 5, n_obstacles: int = 4):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Helicopter RL Evaluation")
-    parser.add_argument("--phase",    type=int, default=1, choices=[1, 2, 3])
+    parser.add_argument("--phase",    type=int, default=2, choices=[1, 2, 3])
     parser.add_argument("--all",      action="store_true", help="Evaluate all phases")
     parser.add_argument("--demo",     action="store_true", help="Quick demo (3 eps each)")
+    parser.add_argument("--animate",  action="store_true", help="Tek bölüm animasyonu üret")
+    parser.add_argument("--gif",      action="store_true", help="HTML yerine GIF kaydet")
     parser.add_argument("--episodes", type=int, default=5)
-    parser.add_argument("--n_obs",    type=int, default=4,  help="Obstacles for Phase 3")
+    parser.add_argument("--n_obs",    type=int, default=2,  help="Test edilecek engel sayısı")
+    parser.add_argument("--interval", type=int, default=40, help="Animasyon kare hızı (ms)")
     args = parser.parse_args()
 
     os.makedirs(FIGURES_DIR, exist_ok=True)
@@ -338,5 +342,121 @@ if __name__ == "__main__":
         if len(results_all) > 1:
             plot_stats(results_all)
 
+    elif args.animate:
+        ext  = ".gif" if args.gif else ".html"
+        name = f"phase{args.phase}_n{args.n_obs}_obs{ext}"
+        save = os.path.join(FIGURES_DIR, name)
+        animate_episode(
+            phase      = args.phase,
+            n_obstacles= args.n_obs,
+            interval   = args.interval,
+            save_path  = save,
+        )
+
     else:
         evaluate_phase(args.phase, n_episodes=args.episodes, n_obstacles=args.n_obs)
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Flight animation (Colab / Jupyter)
+# ─────────────────────────────────────────────────────────────────────────
+
+def animate_episode(phase: int = 3, n_obstacles: int = 4, interval: int = 40,
+                    episode_idx: int = 0, save_path: str = None):
+    """
+    Tek bir bölümü 3D animasyon olarak döndürür.
+
+    Colab'da:  from IPython.display import HTML; HTML(animate_episode(2, 2).to_jshtml())
+    Yerel:     animate_episode(2, 2, save_path='figures/anim.html')  → tarayıcıda aç
+    """
+    model = load_model(phase)
+    env   = make_env(phase, n_obstacles=n_obstacles)
+
+    obs_vec, _ = env.reset()
+    start  = env.pos.copy()
+    target = env.target.copy()
+    obstacles = env.get_obstacles() if hasattr(env, "get_obstacles") else []
+
+    positions = [env.pos.copy()]
+    done = False
+    while not done:
+        action, _ = model.predict(obs_vec, deterministic=True)
+        obs_vec, _, terminated, truncated, info = env.step(action)
+        positions.append(env.pos.copy())
+        done = terminated or truncated
+
+    traj   = np.array(positions)
+    status = ("✓ ULAŞTI" if info.get("success") else
+              "✗ ÇARPIŞMA" if info.get("collision") else "✗ süre doldu")
+    print(f"Bölüm sonucu: {status}  |  adım: {len(traj)}  |  "
+          f"son mesafe: {np.linalg.norm(env.target - env.pos):.1f}m")
+
+    # ── Figure ──────────────────────────────────────────────────────────
+    fig = plt.figure(figsize=(12, 9))
+    ax  = fig.add_subplot(111, projection="3d")
+
+    ax.scatter(*start,  color="lime", s=180, marker="o",
+               edgecolors="k", linewidth=0.8, zorder=6, label="Başlangıç")
+    ax.scatter(*target, color="gold", s=350, marker="*",
+               edgecolors="k", linewidth=0.8, zorder=7, label="Hedef")
+
+    for obs in obstacles:
+        _cyl(ax, obs["pos"], obs["radius"], obs["height"])
+
+    pts = np.vstack([traj, [start], [target]])
+    pad = 30
+    ax.set_xlim(pts[:, 0].min() - pad, pts[:, 0].max() + pad)
+    ax.set_ylim(pts[:, 1].min() - pad, pts[:, 1].max() + pad)
+    ax.set_zlim(max(0, pts[:, 2].min() - pad), pts[:, 2].max() + pad)
+    ax.set_xlabel("X [m]"); ax.set_ylabel("Y [m]"); ax.set_zlabel("Yükseklik [m]")
+    ax.set_title(f"Faz {phase} Uçuş Animasyonu — {status}",
+                 fontsize=13, fontweight="bold")
+
+    proxies = [
+        Line2D([0], [0], marker="o", color="w", markerfacecolor="lime",
+               markersize=10, label="Başlangıç"),
+        Line2D([0], [0], marker="*", color="w", markerfacecolor="gold",
+               markersize=14, label="Hedef"),
+    ]
+    if obstacles:
+        proxies.append(mpatches.Patch(color="red", alpha=0.35, label="Engel"))
+    ax.legend(handles=proxies, loc="upper right", fontsize=9)
+
+    step_size = max(1, len(traj) // 300)
+    frames    = list(range(0, len(traj), step_size))
+
+    path_line, = ax.plot([], [], [], color="royalblue", lw=2.0, alpha=0.8)
+    heli_dot,  = ax.plot([], [], [], "o", color="deepskyblue", markersize=13,
+                          zorder=10, markeredgecolor="navy", markeredgewidth=1.5)
+    time_text  = ax.text2D(0.02, 0.95, "", transform=ax.transAxes,
+                           fontsize=10, color="navy")
+
+    def update(fi):
+        i = fi + 1
+        path_line.set_data(traj[:i, 0], traj[:i, 1])
+        path_line.set_3d_properties(traj[:i, 2])
+        heli_dot.set_data([traj[fi, 0]], [traj[fi, 1]])
+        heli_dot.set_3d_properties([traj[fi, 2]])
+        time_text.set_text(f"Adım: {fi * step_size}  |  "
+                           f"Yükseklik: {traj[fi, 2]:.0f}m")
+        return path_line, heli_dot, time_text
+
+    anim = FuncAnimation(fig, update, frames=frames,
+                         interval=interval, blit=False)
+    plt.close(fig)
+
+    if save_path:
+        os.makedirs(FIGURES_DIR, exist_ok=True)
+        if save_path.endswith(".gif"):
+            anim.save(save_path, writer="pillow", fps=max(1, 1000 // interval))
+            print(f"  → GIF kaydedildi: {save_path}")
+        else:
+            html_path = save_path if save_path.endswith(".html") else save_path + ".html"
+            import matplotlib
+            matplotlib.rcParams["animation.embed_limit"] = 64
+            with open(html_path, "w", encoding="utf-8") as f:
+                f.write(anim.to_jshtml())
+            print(f"  → Animasyon kaydedildi: {html_path}")
+            print(f"  → Tarayıcıda açmak için dosyaya çift tıkla")
+
+    return anim
