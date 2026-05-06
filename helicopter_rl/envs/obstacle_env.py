@@ -143,27 +143,39 @@ class ObstacleHelicopterEnv(FlightControlEnv3D):
     def _obstacle_distances(self) -> tuple[float, float]:
         """
         Returns:
-            surf_dist_1 : surface distance to the nearest cylinder [m]
-            surf_dist_2 : surface distance to the 2nd nearest cylinder [m]
-                          (world_size when there is only one obstacle)
+            surf_dist_nearest : surface distance to the nearest in-range cylinder [m]
+            bearing_sin       : sin(angle from heading to nearest obstacle centre)
+                                > 0 → obstacle is to the LEFT  of current heading
+                                < 0 → obstacle is to the RIGHT of current heading
+                                0.0 when no obstacle is in range
+        When the agent clears the nearest obstacle it automatically tracks the next,
+        so two obstacles are handled sequentially with full directional awareness.
         """
         if not self.obstacles:
-            return self.world_size, self.world_size
+            return self.world_size, 0.0
 
-        surf_dists = []
+        yr = np.deg2rad(self.yaw)
+        fwd = np.array([np.cos(yr), np.sin(yr)])   # unit heading vector
+
+        best_dist    = self.world_size
+        best_bearing = 0.0
+
         for obs in self.obstacles:
             if self.pos[2] > obs["pos"][2] + obs["height"]:
                 continue
-            horiz_dist = float(np.linalg.norm(obs["pos"][:2] - self.pos[:2]))
-            surf_dists.append(horiz_dist - obs["radius"])
+            to_obs_xy  = obs["pos"][:2] - self.pos[:2]
+            horiz_dist = float(np.linalg.norm(to_obs_xy))
+            surf_dist  = horiz_dist - obs["radius"]
+            if surf_dist < best_dist:
+                best_dist = surf_dist
+                if horiz_dist > 1e-3:
+                    d_norm = to_obs_xy / horiz_dist
+                    # 2-D cross product: fwd × d_norm = sin of angle (left > 0)
+                    best_bearing = float(fwd[0] * d_norm[1] - fwd[1] * d_norm[0])
+                else:
+                    best_bearing = 0.0
 
-        if not surf_dists:
-            return self.world_size, self.world_size
-
-        surf_dists.sort()
-        first  = surf_dists[0]
-        second = surf_dists[1] if len(surf_dists) > 1 else self.world_size
-        return first, second
+        return best_dist, best_bearing
 
     def _is_collision(self) -> bool:
         for obs in self.obstacles:
@@ -181,9 +193,9 @@ class ObstacleHelicopterEnv(FlightControlEnv3D):
     def _obs(self) -> np.ndarray:
         obs = super()._obs()
 
-        surf1, surf2 = self._obstacle_distances()
-        obs[18] = float(np.clip(surf1 / 150.0, 0.0, 1.0))
-        obs[19] = float(np.clip(surf2 / 150.0, 0.0, 1.0))
+        surf_dist, bearing_sin = self._obstacle_distances()
+        obs[18] = float(np.clip(surf_dist / 150.0, 0.0, 1.0))
+        obs[19] = float(np.clip(bearing_sin, -1.0, 1.0))   # ±1: left/right of heading
 
         return obs
 
@@ -219,15 +231,21 @@ class ObstacleHelicopterEnv(FlightControlEnv3D):
         info: dict = {}
         terminated = False
 
-        # Collision
         if self._is_collision():
             return -1000.0, True, {"collision": True}
 
-        surf1, surf2 = self._obstacle_distances()
+        # Collect raw surface distances for ALL obstacles (independent of obs encoding)
+        all_surf_dists = []
+        for obs in self.obstacles:
+            if self.pos[2] > obs["pos"][2] + obs["height"]:
+                continue
+            horiz = float(np.linalg.norm(obs["pos"][:2] - self.pos[:2]))
+            all_surf_dists.append(horiz - obs["radius"])
+
+        if not all_surf_dists:
+            return 0.0, False, info
 
         def _proximity_penalty(d: float) -> float:
-            if d >= self.world_size:
-                return 0.0
             if d < self.safety_margin:
                 factor = (self.safety_margin - d) / self.safety_margin
                 linger = 1.0 - d / self.safety_margin
@@ -236,9 +254,9 @@ class ObstacleHelicopterEnv(FlightControlEnv3D):
                 return 0.3 - 0.05 * (1.0 - d / (self.safety_margin * 2.0))
             return 0.0
 
-        reward = _proximity_penalty(surf1) + _proximity_penalty(surf2)
+        reward = sum(_proximity_penalty(d) for d in all_surf_dists)
 
-        if surf1 < self.safety_margin or surf2 < self.safety_margin:
+        if any(d < self.safety_margin for d in all_surf_dists):
             info["near_obstacle"] = True
 
         return reward, terminated, info
