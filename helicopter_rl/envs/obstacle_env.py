@@ -249,7 +249,7 @@ class ObstacleHelicopterEnv(FlightControlEnv3D):
             if d < self.safety_margin:
                 factor = (self.safety_margin - d) / self.safety_margin
                 linger = 1.0 - d / self.safety_margin
-                return -15.0 * (factor ** 2) - 0.1 * linger
+                return -30.0 * (factor ** 2) - 0.2 * linger
             return 0.0
 
         reward = sum(_proximity_penalty(d) for d in all_surf_dists)
