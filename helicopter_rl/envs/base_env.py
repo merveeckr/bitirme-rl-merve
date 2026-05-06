@@ -272,8 +272,8 @@ class FlightControlEnv3D(gym.Env):
             terminated = True
             info["out_of_bounds"] = True
 
-        # Time penalty (efficiency)
-        r_time = -0.1
+        # Time penalty (efficiency) — increased to discourage long detours
+        r_time = -0.2
 
         total = r_progress + r_goal + r_stability + r_altitude + r_bounds + r_time
         return total, terminated, info
