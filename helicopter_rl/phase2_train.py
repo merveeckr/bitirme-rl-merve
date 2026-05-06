@@ -217,10 +217,14 @@ def evaluate(model_path: str = FINAL_ZIP, n_episodes: int = 5):
 # Entry point
 # ─────────────────────────────────────────────────────────────────────────
 
-def train_2obs(total_timesteps: int = 600_000, n_envs: int = 4):
+def train_2obs(total_timesteps: int = 1_000_000, n_envs: int = 4):
     """
     Phase 2 modelini 2 engelle ince ayar yapar.
     Önce Phase 2 (1 engel) modelini yükler, 2 engelle eğitmeye devam eder.
+
+    obs[19] artık 2. engele olan yüzey mesafesini taşıyor
+    (eski: ileri yön mesafesi). Bu sayede ajan her iki engeli
+    aynı anda "görebiliyor".
     """
     MODEL_DIR_2OBS = "models/phase2_2obs"
     LOG_DIR_2OBS   = "logs/phase2_2obs"
@@ -231,7 +235,7 @@ def train_2obs(total_timesteps: int = 600_000, n_envs: int = 4):
         env = ObstacleHelicopterEnv(
             n_obstacles=2, obstacle_radius=15.0,
             obstacle_height=120.0, safety_margin=25.0,
-            max_steps=1300, wind_strength_max=5.0,
+            max_steps=1400, wind_strength_max=4.0,
         )
         return Monitor(env, LOG_DIR_2OBS)
 
@@ -247,8 +251,9 @@ def train_2obs(total_timesteps: int = 600_000, n_envs: int = 4):
         if os.path.exists(src + ".zip"):
             print(f"  ↳ Phase 2 ağırlıkları yükleniyor: {src}.zip")
             kw = {k: v for k, v in PPO_KWARGS.items() if k != "policy_kwargs"}
-            kw["learning_rate"] = 1e-4
-            kw["ent_coef"]      = 0.01
+            kw["learning_rate"] = 8e-5   # çok düşük lr → Phase 1 navigasyon becerisi korunur
+            kw["ent_coef"]      = 0.008  # düşük entropi → keşiften ziyade ince ayar
+            kw["clip_range"]    = 0.15   # daha muhafazakâr politika güncellemesi
             model = PPO.load(src, env=train_env, **kw)
             break
     else:
@@ -259,8 +264,8 @@ def train_2obs(total_timesteps: int = 600_000, n_envs: int = 4):
             eval_env,
             best_model_save_path=MODEL_DIR_2OBS,
             log_path=LOG_DIR_2OBS,
-            eval_freq=max(10_000 // n_envs, 1),
-            n_eval_episodes=10,
+            eval_freq=max(8_000 // n_envs, 1),
+            n_eval_episodes=12,
             deterministic=True,
             verbose=1,
         ),
@@ -273,8 +278,9 @@ def train_2obs(total_timesteps: int = 600_000, n_envs: int = 4):
 
     print("=" * 60)
     print("PHASE 2 → 2 ENGEL İNCE AYAR")
-    print(f"  Timesteps : {total_timesteps:,}")
-    print(f"  LR        : 1e-4  |  ent_coef: 0.01")
+    print(f"  Timesteps  : {total_timesteps:,}")
+    print(f"  LR         : 8e-5  |  ent_coef: 0.008  |  clip: 0.15")
+    print(f"  obs[19]    : 2. engel yüzey mesafesi (önceden: ileri yön)")
     print("=" * 60)
 
     model.learn(total_timesteps=total_timesteps, callback=callbacks,
@@ -302,7 +308,7 @@ if __name__ == "__main__":
         train(total_timesteps=args.timesteps, n_envs=args.n_envs)
 
     if args.train2obs:
-        train_2obs(n_envs=args.n_envs)
+        train_2obs(total_timesteps=args.timesteps, n_envs=args.n_envs)
 
     if args.eval or not (args.train or args.train2obs):
         evaluate(n_episodes=args.episodes)
