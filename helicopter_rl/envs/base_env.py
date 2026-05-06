@@ -246,7 +246,7 @@ class FlightControlEnv3D(gym.Env):
         terminated = False
 
         # Progress (potential shaping)
-        r_progress = (self.prev_dist - curr_dist) * 15.0
+        r_progress = (self.prev_dist - curr_dist) * 10.0
         self.prev_dist = curr_dist
 
         # Goal
