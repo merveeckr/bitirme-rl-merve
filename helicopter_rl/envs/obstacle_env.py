@@ -85,7 +85,7 @@ class ObstacleHelicopterEnv(FlightControlEnv3D):
 
         for _ in range(self.n_obstacles):
             placed = False
-            for _attempt in range(100):
+            for _ in range(100):
                 # Position along path
                 t = float(self.np_random.uniform(0.25, 0.75))
                 # Random lateral offset
@@ -250,8 +250,6 @@ class ObstacleHelicopterEnv(FlightControlEnv3D):
                 factor = (self.safety_margin - d) / self.safety_margin
                 linger = 1.0 - d / self.safety_margin
                 return -50.0 * (factor ** 2) - 0.3 * linger
-            elif d < self.safety_margin * 2.0:
-                return 0.3 - 0.05 * (1.0 - d / (self.safety_margin * 2.0))
             return 0.0
 
         reward = sum(_proximity_penalty(d) for d in all_surf_dists)
