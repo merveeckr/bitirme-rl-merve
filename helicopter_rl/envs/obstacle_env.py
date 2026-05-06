@@ -143,45 +143,27 @@ class ObstacleHelicopterEnv(FlightControlEnv3D):
     def _obstacle_distances(self) -> tuple[float, float]:
         """
         Returns:
-            min_surface_dist : minimum surface distance to any cylinder [m]
-            forward_dist     : distance to nearest obstacle along flight direction [m]
+            surf_dist_1 : surface distance to the nearest cylinder [m]
+            surf_dist_2 : surface distance to the 2nd nearest cylinder [m]
+                          (world_size when there is only one obstacle)
         """
         if not self.obstacles:
             return self.world_size, self.world_size
 
-        # Velocity / heading direction for forward projection
-        vel_xy = self.vel[:2].copy()
-        spd = float(np.linalg.norm(vel_xy))
-        if spd > 0.5:
-            fwd_dir = vel_xy / spd
-        else:
-            yr = np.deg2rad(self.yaw)
-            fwd_dir = np.array([np.cos(yr), np.sin(yr)])
-
-        min_surf = float("inf")
-        fwd_dist = self.world_size
-
+        surf_dists = []
         for obs in self.obstacles:
-            # Skip if helicopter is above this obstacle
             if self.pos[2] > obs["pos"][2] + obs["height"]:
                 continue
+            horiz_dist = float(np.linalg.norm(obs["pos"][:2] - self.pos[:2]))
+            surf_dists.append(horiz_dist - obs["radius"])
 
-            # Horizontal distance to cylinder axis
-            to_obs_xy = obs["pos"][:2] - self.pos[:2]
-            horiz_dist = float(np.linalg.norm(to_obs_xy))
-            surf_dist  = horiz_dist - obs["radius"]
+        if not surf_dists:
+            return self.world_size, self.world_size
 
-            if surf_dist < min_surf:
-                min_surf = surf_dist
-
-            # Forward distance: projection of obs centre onto fwd_dir
-            proj   = float(np.dot(to_obs_xy, fwd_dir))
-            if proj > 0.0:
-                lateral = float(np.sqrt(max(0.0, np.dot(to_obs_xy, to_obs_xy) - proj * proj)))
-                if lateral < obs["radius"] + 15.0:   # on collision course
-                    fwd_dist = min(fwd_dist, proj)
-
-        return min_surf, fwd_dist
+        surf_dists.sort()
+        first  = surf_dists[0]
+        second = surf_dists[1] if len(surf_dists) > 1 else self.world_size
+        return first, second
 
     def _is_collision(self) -> bool:
         for obs in self.obstacles:
@@ -199,9 +181,9 @@ class ObstacleHelicopterEnv(FlightControlEnv3D):
     def _obs(self) -> np.ndarray:
         obs = super()._obs()
 
-        min_surf, fwd_dist = self._obstacle_distances()
-        obs[18] = float(np.clip(min_surf  / 150.0, 0.0, 1.0))
-        obs[19] = float(np.clip(fwd_dist  / 250.0, 0.0, 1.0))
+        surf1, surf2 = self._obstacle_distances()
+        obs[18] = float(np.clip(surf1 / 150.0, 0.0, 1.0))
+        obs[19] = float(np.clip(surf2 / 150.0, 0.0, 1.0))
 
         return obs
 
@@ -230,6 +212,8 @@ class ObstacleHelicopterEnv(FlightControlEnv3D):
         Design Doc 4.1.4:
           Safety Penalty : -1000 on collision
           Proximity zone : graduated penalty in [safety_margin, 0] band
+                           applied independently to EACH obstacle so the agent
+                           learns to stay clear of all of them simultaneously
           Safe zone      : small reward for maintaining distance > safety_margin
         """
         info: dict = {}
@@ -239,23 +223,23 @@ class ObstacleHelicopterEnv(FlightControlEnv3D):
         if self._is_collision():
             return -1000.0, True, {"collision": True}
 
-        min_surf, _fwd = self._obstacle_distances()
+        surf1, surf2 = self._obstacle_distances()
 
-        reward = 0.0
+        def _proximity_penalty(d: float) -> float:
+            if d >= self.world_size:
+                return 0.0
+            if d < self.safety_margin:
+                factor = (self.safety_margin - d) / self.safety_margin
+                linger = 1.0 - d / self.safety_margin
+                return -50.0 * (factor ** 2) - 0.3 * linger
+            elif d < self.safety_margin * 2.0:
+                return 0.3 - 0.05 * (1.0 - d / (self.safety_margin * 2.0))
+            return 0.0
 
-        if min_surf < self.safety_margin:
-            # Graduated: max -50 at surface, 0 at safety_margin
-            factor = (self.safety_margin - min_surf) / self.safety_margin
-            reward = -50.0 * (factor ** 2)
+        reward = _proximity_penalty(surf1) + _proximity_penalty(surf2)
+
+        if surf1 < self.safety_margin or surf2 < self.safety_margin:
             info["near_obstacle"] = True
-            # Time penalty for lingering near obstacle — breaks spiral behaviour
-            linger_factor = 1.0 - (min_surf / self.safety_margin)
-            reward -= 0.3 * linger_factor
-        elif min_surf < self.safety_margin * 2.0:
-            # Small reward for flying safely near (but not too close to) obstacle
-            reward = 0.3
-            # Mild time nudge to keep moving through the safe band
-            reward -= 0.05 * (1.0 - min_surf / (self.safety_margin * 2.0))
 
         return reward, terminated, info
 
