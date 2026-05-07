@@ -3,7 +3,7 @@ FlightControlEnv3D - Phase 1: Basic 3D Helicopter Navigation
 
 Design Document Reference: Section 4.1 (Module Design)
 
-State vector (20-dim):
+State vector (26-dim):
   [0-2]   dir_to_target (unit vec 3D)
   [3]     dist_to_target (normalized)
   [4-6]   velocity vx, vy, vz (normalized)
@@ -12,16 +12,21 @@ State vector (20-dim):
   [11-13] angular rates p, q, r (normalized)
   [14-16] wind x, y, z (normalized)
   [17]    step progress (0→1)
-  [18-19] obstacle distances (1.0 = no obstacle)
+  [18-25] LiDAR sectors — 8 × normalised distance (1.0 = clear / no obstacle)
+           Sector order (relative to heading):
+             18: 0°  ahead        22: 180° behind
+             19: 45° front-left   23: 225° rear-right
+             20: 90° left         24: 270° right
+             21: 135° rear-left   25: 315° front-right
 
 Action vector (4-dim continuous [-1, 1]):
-  [0] roll_rate   → scaled to ±45 deg/s
-  [1] pitch_rate  → scaled to ±45 deg/s
-  [2] yaw_rate    → scaled to ±60 deg/s
-  [3] vert_vel    → scaled to ±5 m/s
+  [0] roll_rate   → ±45 deg/s
+  [1] pitch_rate  → ±45 deg/s
+  [2] yaw_rate    → ±60 deg/s
+  [3] vert_vel    → ±5 m/s
 
 Reward:
-  R_total = 10*R_progress + R_goal + 0.5*R_stability + R_time + R_bounds
+  R_total = 10*R_progress + R_goal + R_stability + R_time + R_bounds + R_path
 """
 
 import numpy as np
@@ -31,9 +36,12 @@ from gymnasium import spaces
 
 class FlightControlEnv3D(gym.Env):
     """
-    3D helicopter navigation environment - Phase 1 (no obstacles).
+    3D helicopter navigation — Phase 1 (no obstacles).
     Helicopter must reach a randomly placed 3D target.
-    Uses simplified helicopter kinematics based on tilt-to-velocity mapping.
+
+    Physics: inertial tilt-to-velocity model with aerodynamic drag.
+    Reward includes a path-deviation term so the agent learns to return
+    to the straight-line route after manoeuvring around obstacles.
     """
 
     metadata = {"render_modes": ["human"]}
@@ -49,27 +57,29 @@ class FlightControlEnv3D(gym.Env):
         super().__init__()
 
         # ── World parameters ──────────────────────────────────────────────
-        self.world_size = world_size
-        self.min_altitude = 5.0
-        self.max_altitude = 200.0
-        self.target_radius = target_radius
-        self.max_steps = max_steps
+        self.world_size       = world_size
+        self.min_altitude     = 5.0
+        self.max_altitude     = 200.0
+        self.target_radius    = target_radius
+        self.max_steps        = max_steps
         self.wind_strength_max = wind_strength_max
 
         # ── Helicopter physics parameters ─────────────────────────────────
-        self.dt = 0.1                  # simulation time-step  [s]
-        self.max_tilt = 30.0           # max roll / pitch      [deg]
-        self.max_tilt_rate = 45.0      # max tilt rate         [deg/s]
-        self.max_yaw_rate = 60.0       # max yaw rate          [deg/s]
-        self.max_vert_speed = 5.0      # max vertical speed    [m/s]
-        self.max_horiz_speed = 20.0    # max horizontal speed  [m/s]
+        self.dt               = 0.1     # simulation time-step [s]
+        self.max_tilt         = 30.0    # max roll / pitch     [deg]
+        self.max_tilt_rate    = 45.0    # [deg/s]
+        self.max_yaw_rate     = 60.0    # [deg/s]
+        self.max_vert_speed   = 5.0     # [m/s]
+        self.max_horiz_speed  = 20.0    # [m/s]
+        # Velocity filter coefficient — lower = more inertia (realistic lag)
+        self._vel_alpha       = 0.2
 
         # ── Gym spaces ───────────────────────────────────────────────────
         self.action_space = spaces.Box(
             low=-1.0, high=1.0, shape=(4,), dtype=np.float32
         )
         self.observation_space = spaces.Box(
-            low=-np.inf, high=np.inf, shape=(20,), dtype=np.float32
+            low=-np.inf, high=np.inf, shape=(26,), dtype=np.float32
         )
 
         self.render_mode = render_mode
@@ -80,19 +90,20 @@ class FlightControlEnv3D(gym.Env):
     # ──────────────────────────────────────────────────────────────────────
 
     def _init_internals(self):
-        self.pos = np.zeros(3, dtype=np.float64)
-        self.vel = np.zeros(3, dtype=np.float64)
-        self.roll = 0.0
-        self.pitch = 0.0
-        self.yaw = 0.0
-        self.roll_rate = 0.0
+        self.pos        = np.zeros(3, dtype=np.float64)
+        self.vel        = np.zeros(3, dtype=np.float64)
+        self.roll       = 0.0
+        self.pitch      = 0.0
+        self.yaw        = 0.0
+        self.roll_rate  = 0.0
         self.pitch_rate = 0.0
-        self.yaw_rate = 0.0
-        self.target = np.zeros(3, dtype=np.float64)
-        self.wind = np.zeros(3, dtype=np.float64)
+        self.yaw_rate   = 0.0
+        self.target     = np.zeros(3, dtype=np.float64)
+        self.wind       = np.zeros(3, dtype=np.float64)
         self.step_count = 0
-        self.prev_dist = 0.0
+        self.prev_dist  = 0.0
         self.trajectory: list = []
+        self.episode_start = np.zeros(2, dtype=np.float64)
 
     # ──────────────────────────────────────────────────────────────────────
     # Gym interface
@@ -101,7 +112,7 @@ class FlightControlEnv3D(gym.Env):
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
 
-        # Random start position (some altitude)
+        # Random start position
         self.pos = np.array([
             self.np_random.uniform(-150.0, 150.0),
             self.np_random.uniform(-150.0, 150.0),
@@ -115,18 +126,17 @@ class FlightControlEnv3D(gym.Env):
                 self.np_random.uniform(-200.0, 200.0),
                 self.np_random.uniform(15.0, 100.0),
             ], dtype=np.float64)
-            d = np.linalg.norm(self.target - self.pos)
-            if 80.0 <= d <= 380.0:
+            if 80.0 <= np.linalg.norm(self.target - self.pos) <= 380.0:
                 break
 
         # Dynamics reset
-        self.vel[:] = 0.0
-        self.roll = 0.0
-        self.pitch = 0.0
-        self.yaw = float(self.np_random.uniform(0.0, 360.0))
+        self.vel[:]  = 0.0
+        self.roll    = 0.0
+        self.pitch   = 0.0
+        self.yaw     = float(self.np_random.uniform(0.0, 360.0))
         self.roll_rate = self.pitch_rate = self.yaw_rate = 0.0
 
-        # Light random wind
+        # Random wind
         ws = float(self.np_random.uniform(0.0, self.wind_strength_max))
         wd = float(self.np_random.uniform(0.0, 2.0 * np.pi))
         self.wind = np.array([
@@ -135,9 +145,10 @@ class FlightControlEnv3D(gym.Env):
             float(self.np_random.uniform(-0.3, 0.3)),
         ])
 
-        self.step_count = 0
-        self.prev_dist = float(np.linalg.norm(self.target - self.pos))
-        self.trajectory = [self.pos.copy()]
+        self.step_count    = 0
+        self.prev_dist     = float(np.linalg.norm(self.target - self.pos))
+        self.episode_start = self.pos[:2].copy()
+        self.trajectory    = [self.pos.copy()]
 
         return self._obs(), {}
 
@@ -148,7 +159,6 @@ class FlightControlEnv3D(gym.Env):
 
         reward, terminated, info = self._reward()
         truncated = self.step_count >= self.max_steps
-
         return self._obs(), reward, terminated, truncated, info
 
     # ──────────────────────────────────────────────────────────────────────
@@ -156,43 +166,41 @@ class FlightControlEnv3D(gym.Env):
     # ──────────────────────────────────────────────────────────────────────
 
     def _obs(self) -> np.ndarray:
-        delta = self.target - self.pos
-        dist = float(np.linalg.norm(delta)) + 1e-8
+        delta   = self.target - self.pos
+        dist    = float(np.linalg.norm(delta)) + 1e-8
         dir_vec = (delta / dist).astype(np.float32)
 
         obs = np.array([
-            dir_vec[0], dir_vec[1], dir_vec[2],               # 0-2  direction to target
-            dist / self.world_size,                            # 3    distance (norm)
-            self.vel[0] / self.max_horiz_speed,               # 4    vx
-            self.vel[1] / self.max_horiz_speed,               # 5    vy
-            self.vel[2] / self.max_vert_speed,                # 6    vz
-            self.roll  / self.max_tilt,                       # 7    roll
-            self.pitch / self.max_tilt,                       # 8    pitch
-            np.sin(np.deg2rad(self.yaw)),                     # 9    sin(yaw)
-            np.cos(np.deg2rad(self.yaw)),                     # 10   cos(yaw)
-            self.roll_rate  / self.max_tilt_rate,             # 11   p
-            self.pitch_rate / self.max_tilt_rate,             # 12   q
-            self.yaw_rate   / self.max_yaw_rate,              # 13   r
-            self.wind[0] / 10.0,                              # 14   wind x
-            self.wind[1] / 10.0,                              # 15   wind y
-            self.wind[2] / 3.0,                               # 16   wind z
-            self.step_count / self.max_steps,                 # 17   progress
-            1.0,  # obstacle slot – overridden by subclass    # 18   min obs dist
-            1.0,  # obstacle slot – overridden by subclass    # 19   fwd obs dist
+            dir_vec[0], dir_vec[1], dir_vec[2],          # 0-2
+            dist / self.world_size,                       # 3
+            self.vel[0] / self.max_horiz_speed,           # 4
+            self.vel[1] / self.max_horiz_speed,           # 5
+            self.vel[2] / self.max_vert_speed,            # 6
+            self.roll   / self.max_tilt,                  # 7
+            self.pitch  / self.max_tilt,                  # 8
+            np.sin(np.deg2rad(self.yaw)),                 # 9
+            np.cos(np.deg2rad(self.yaw)),                 # 10
+            self.roll_rate  / self.max_tilt_rate,         # 11
+            self.pitch_rate / self.max_tilt_rate,         # 12
+            self.yaw_rate   / self.max_yaw_rate,          # 13
+            self.wind[0] / 10.0,                          # 14
+            self.wind[1] / 10.0,                          # 15
+            self.wind[2] / 3.0,                           # 16
+            self.step_count / self.max_steps,             # 17
+            # [18-25] LiDAR sectors — subclass fills these; default = 1.0 (clear)
+            1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
         ], dtype=np.float32)
 
         return obs
 
     # ──────────────────────────────────────────────────────────────────────
-    # Physics
+    # Physics — inertial tilt-to-velocity model
     # ──────────────────────────────────────────────────────────────────────
 
     def _physics(self, action):
         """
-        Simplified tilt-to-velocity helicopter model.
-        Pitch forward → move in heading direction.
-        Roll right    → move perpendicular (right) to heading.
-        Direct vertical velocity control (collective proxy).
+        Helicopter kinematics with velocity lag (first-order inertia).
+        Lower _vel_alpha → more inertia → more realistic rotor response.
         """
         self.roll_rate  = float(action[0]) * self.max_tilt_rate
         self.pitch_rate = float(action[1]) * self.max_tilt_rate
@@ -200,83 +208,92 @@ class FlightControlEnv3D(gym.Env):
         vert_cmd        = float(action[3]) * self.max_vert_speed
 
         # Update orientation
-        self.roll  = float(np.clip(self.roll  + self.roll_rate  * self.dt,
-                                   -self.max_tilt, self.max_tilt))
-        self.pitch = float(np.clip(self.pitch + self.pitch_rate * self.dt,
-                                   -self.max_tilt, self.max_tilt))
+        self.roll  = float(np.clip(
+            self.roll  + self.roll_rate  * self.dt, -self.max_tilt, self.max_tilt))
+        self.pitch = float(np.clip(
+            self.pitch + self.pitch_rate * self.dt, -self.max_tilt, self.max_tilt))
         self.yaw   = (self.yaw + self.yaw_rate * self.dt) % 360.0
 
-        # Tilt fractions → target horizontal velocity (world frame)
+        # Tilt → target horizontal velocity (world frame)
         yr = np.deg2rad(self.yaw)
-        pf = self.pitch / self.max_tilt   # [-1, 1]
-        rf = self.roll  / self.max_tilt   # [-1, 1]
+        pf = self.pitch / self.max_tilt
+        rf = self.roll  / self.max_tilt
 
         vx_target = self.max_horiz_speed * ( pf * np.cos(yr) - rf * np.sin(yr))
         vy_target = self.max_horiz_speed * ( pf * np.sin(yr) + rf * np.cos(yr))
 
-        # Low-pass filter on horizontal velocity
-        alpha = 0.4
-        self.vel[0] = alpha * vx_target + (1.0 - alpha) * self.vel[0]
-        self.vel[1] = alpha * vy_target + (1.0 - alpha) * self.vel[1]
+        # First-order inertial filter (α=0.2 → ~0.5 s time constant)
+        a = self._vel_alpha
+        self.vel[0] = a * vx_target + (1.0 - a) * self.vel[0]
+        self.vel[1] = a * vy_target + (1.0 - a) * self.vel[1]
         self.vel[2] = vert_cmd
 
-        # Wind perturbation + aerodynamic drag
+        # Wind + aerodynamic drag
         self.vel[:2] += self.wind[:2] * 0.05
         self.vel[:2] *= 0.97
 
-        # Integrate position
-        self.pos = self.pos + self.vel * self.dt
-        self.pos[2] = float(np.clip(self.pos[2], self.min_altitude, self.max_altitude))
+        self.pos     = self.pos + self.vel * self.dt
+        self.pos[2]  = float(np.clip(self.pos[2], self.min_altitude, self.max_altitude))
 
     # ──────────────────────────────────────────────────────────────────────
-    # Reward (Design Doc Section 4.1.4)
+    # Reward
     # ──────────────────────────────────────────────────────────────────────
 
     def _reward(self):
-        """
-        Multi-objective reward:
-          R_progress  — potential-based shaping (prev_dist - curr_dist)
-          R_goal      — large bonus on reaching target
-          R_stability — penalise excessive tilt
-          R_time      — small per-step penalty for efficiency
-          R_bounds    — heavy penalty for leaving world
-        """
-        curr_dist = float(np.linalg.norm(self.target - self.pos))
+        curr_dist  = float(np.linalg.norm(self.target - self.pos))
         info: dict = {}
         terminated = False
 
-        # Progress (potential shaping)
+        # Progress
         r_progress = (self.prev_dist - curr_dist) * 10.0
         self.prev_dist = curr_dist
 
         # Goal
         r_goal = 0.0
         if curr_dist < self.target_radius:
-            r_goal = 500.0
+            r_goal     = 500.0
             terminated = True
             info["success"] = True
 
-        # Stability penalty
-        r_stability = -(
-            abs(self.roll)  / self.max_tilt +
-            abs(self.pitch) / self.max_tilt
-        ) * 0.5
+        # Stability
+        r_stability = -(abs(self.roll) / self.max_tilt +
+                        abs(self.pitch) / self.max_tilt) * 0.5
 
-        # Altitude floor penalty
+        # Altitude floor
         r_altitude = -2.0 if self.pos[2] <= self.min_altitude + 2.0 else 0.0
 
-        # Out-of-bounds penalty
+        # Out-of-bounds
         r_bounds = 0.0
         if np.any(np.abs(self.pos[:2]) > self.world_size):
-            r_bounds = -200.0
+            r_bounds   = -200.0
             terminated = True
             info["out_of_bounds"] = True
 
-        # Time penalty (efficiency)
+        # Time penalty
         r_time = -0.1
 
-        total = r_progress + r_goal + r_stability + r_altitude + r_bounds + r_time
+        # Path deviation — gentle nudge to return to straight-line route
+        r_path = self._path_deviation_reward()
+
+        total = r_progress + r_goal + r_stability + r_altitude + r_bounds + r_time + r_path
         return total, terminated, info
+
+    def _path_deviation_reward(self) -> float:
+        """
+        Penalises lateral distance from the straight line episode_start → target.
+        Encourages the agent to return to the optimal route after obstacle manoeuvres.
+        Kept small so obstacle avoidance always takes priority.
+        """
+        path_vec = self.target[:2] - self.episode_start
+        path_len = float(np.linalg.norm(path_vec))
+        if path_len < 1e-3:
+            return 0.0
+        path_dir    = path_vec / path_len
+        pos_vec     = self.pos[:2] - self.episode_start
+        proj        = float(np.dot(pos_vec, path_dir))
+        lateral     = pos_vec - proj * path_dir
+        lateral_dist = float(np.linalg.norm(lateral))
+        return -0.02 * lateral_dist / 100.0
 
     # ──────────────────────────────────────────────────────────────────────
     # Utilities
