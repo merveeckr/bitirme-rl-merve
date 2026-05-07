@@ -235,13 +235,11 @@ class ObstacleHelicopterEnv(FlightControlEnv3D):
         dists.sort()
         return dists[0], dists[1] if len(dists) > 1 else self.world_size
 
-    _COLLISION_BUFFER = 2.0  # discrete-time safety buffer [m]
-
     def _is_collision(self) -> bool:
         for obs in self.obstacles:
             if self.pos[2] > obs["pos"][2] + obs["height"]:
                 continue
-            if float(np.linalg.norm(self.pos[:2] - obs["pos"][:2])) < obs["radius"] + self._COLLISION_BUFFER:
+            if float(np.linalg.norm(self.pos[:2] - obs["pos"][:2])) < obs["radius"]:
                 return True
         return False
 
