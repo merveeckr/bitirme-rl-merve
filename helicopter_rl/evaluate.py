@@ -40,13 +40,20 @@ FIGURES_DIR = "figures"
 # Model loader
 # ─────────────────────────────────────────────────────────────────────────
 
-def load_model(phase: int):
+def load_model(phase: int, n_obstacles: int = 1):
     candidates = {
         1: ["models/phase1/best_model", "models/phase1/ppo_phase1_final"],
         2: ["models/phase2/best_model", "models/phase2/ppo_phase2_final"],
         3: ["models/phase3/best_model", "models/phase3/ppo_phase3_final",
             "models/phase3/stage_3C/ppo_phase3C_final"],
     }
+    # Phase 2 with 2+ obstacles: prefer the 2obs fine-tuned model
+    if phase == 2 and n_obstacles >= 2:
+        for path in ["models/phase2_2obs/best_model", "models/phase2_2obs/ppo_p2_2obs_final"]:
+            if os.path.exists(path + ".zip"):
+                print(f"  ↳ 2-engel modeli yükleniyor: {path}.zip")
+                return PPO.load(path)
+        print("  ↳ 2-engel modeli bulunamadı, Phase 2 (1 engel) modeli kullanılıyor")
     for path in candidates.get(phase, []):
         if os.path.exists(path + ".zip"):
             return PPO.load(path)
@@ -75,7 +82,7 @@ def make_env(phase: int, n_obstacles: int = 1):
 # ─────────────────────────────────────────────────────────────────────────
 
 def run_evaluation(phase: int, n_episodes: int = 5, n_obstacles: int = 4):
-    model = load_model(phase)
+    model = load_model(phase, n_obstacles=n_obstacles)
     env   = make_env(phase, n_obstacles=n_obstacles)
 
     trajectories, targets, starts, obs_list = [], [], [], []
