@@ -30,7 +30,7 @@ from .base_env import FlightControlEnv3D
 _N_SECTORS    = 8
 _SECTOR_DEG   = 360.0 / _N_SECTORS   # 45°
 _LIDAR_RANGE  = 150.0                 # metres
-_LIDAR_NOISE  = 1.5                   # Gaussian σ [m]
+_LIDAR_NOISE  = 0.5                   # Gaussian σ [m]
 
 
 class ObstacleHelicopterEnv(FlightControlEnv3D):
@@ -235,11 +235,13 @@ class ObstacleHelicopterEnv(FlightControlEnv3D):
         dists.sort()
         return dists[0], dists[1] if len(dists) > 1 else self.world_size
 
+    _COLLISION_BUFFER = 2.0  # discrete-time safety buffer [m]
+
     def _is_collision(self) -> bool:
         for obs in self.obstacles:
             if self.pos[2] > obs["pos"][2] + obs["height"]:
                 continue
-            if float(np.linalg.norm(self.pos[:2] - obs["pos"][:2])) < obs["radius"]:
+            if float(np.linalg.norm(self.pos[:2] - obs["pos"][:2])) < obs["radius"] + self._COLLISION_BUFFER:
                 return True
         return False
 
@@ -299,6 +301,9 @@ class ObstacleHelicopterEnv(FlightControlEnv3D):
             return 0.0, False, info
 
         def _penalty(d: float) -> float:
+            if d < 5.0:
+                # steep inner zone — strongly discourages threading
+                return -120.0 * (1.0 - d / 5.0)
             if d < self.safety_margin:
                 f      = (self.safety_margin - d) / self.safety_margin
                 linger = 1.0 - d / self.safety_margin
