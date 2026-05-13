@@ -1,0 +1,92 @@
+<?xml version="1.0"?>
+<fdm_config name="heli_rl" version="2.0" release="ALPHA"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xsi:noNamespaceSchemaLocation="http://jsbsim.sourceforge.net/JSBSim.xsd">
+
+  <fileheader>
+    <author> Helicopter RL — TÜBİTAK 2209-A </author>
+    <filecreationdate> 2026-05-12 </filecreationdate>
+    <description>
+      R22-class helicopter, force-based. Tüm kuvvetler LOCAL (NED) çerçevede
+      Python'dan ExternalReactions ile enjekte edilir. Tutum (roll/pitch/yaw)
+      Python kinematik modeliyle yönetilir; JSBSim yerçekimi + 6-DOF translasyon
+      için kullanılır.
+    </description>
+  </fileheader>
+
+  <!-- ── Geometrik metrikler ─────────────────────────────────────── -->
+  <metrics>
+    <wingarea  unit="M2">  46.2 </wingarea>
+    <wingspan  unit="M">    7.67 </wingspan>
+    <chord     unit="M">    0.18 </chord>
+    <htailarea unit="M2">   0.0  </htailarea>
+    <htailarm  unit="M">    0.0  </htailarm>
+    <vtailarea unit="M2">   0.0  </vtailarea>
+    <vtailarm  unit="M">    0.0  </vtailarm>
+    <location name="AERORP" unit="M">
+      <x>0</x><y>0</y><z>0</z>
+    </location>
+    <location name="EYEPOINT" unit="M">
+      <x>1</x><y>0</y><z>0.5</z>
+    </location>
+    <location name="VRP" unit="M">
+      <x>0</x><y>0</y><z>0</z>
+    </location>
+  </metrics>
+
+  <!-- ── Kütle ve atalet (R22 yüklü ~630 kg) ────────────────────── -->
+  <mass_balance>
+    <ixx unit="SLUG*FT2"> 737.6 </ixx>
+    <iyy unit="SLUG*FT2"> 737.6 </iyy>
+    <izz unit="SLUG*FT2"> 221.3 </izz>
+    <ixy unit="SLUG*FT2">   0.0 </ixy>
+    <ixz unit="SLUG*FT2">   0.0 </ixz>
+    <iyz unit="SLUG*FT2">   0.0 </iyz>
+    <emptywt unit="LBS"> 1389 </emptywt>
+    <location name="CG" unit="M">
+      <x>0</x><y>0</y><z>0</z>
+    </location>
+  </mass_balance>
+
+  <ground_reactions/>
+  <propulsion/>
+
+  <aerodynamics>
+    <!-- Tüm aerodinamik kuvvetler ExternalReactions üzerinden Python'dan -->
+  </aerodynamics>
+
+  <!-- ═══════════════════════════════════════════════════════════════
+       Dış kuvvetler — LOCAL (NED) çerçevede Python her adımda set eder.
+
+       NED (North-East-Down) çerçevesi:
+         force_north: kuzey yönü (+ = kuzey)
+         force_east:  doğu yönü  (+ = doğu)
+         force_up:    dikey      (+ = yukarı, yani JSBSim -Down yönü)
+
+       Python, tutum (roll/pitch/yaw) kinematik modeliyle hesaplar,
+       ardından bu kuvvetleri LOCAL çerçevede enjekte eder.
+       ═══════════════════════════════════════════════════════════════ -->
+  <external_reactions>
+
+    <!-- Dikey kaldırma kuvveti — LOCAL Up yönü (JSBSim -Z) -->
+    <force name="force_up" frame="LOCAL">
+      <location unit="M"><x>0</x><y>0</y><z>0</z></location>
+      <!-- LOCAL çerçevede NED: down=+Z, up=-Z -->
+      <direction><x>0</x><y>0</y><z>-1</z></direction>
+    </force>
+
+    <!-- Yatay kuvvet — LOCAL Kuzey yönü -->
+    <force name="force_north" frame="LOCAL">
+      <location unit="M"><x>0</x><y>0</y><z>0</z></location>
+      <direction><x>1</x><y>0</y><z>0</z></direction>
+    </force>
+
+    <!-- Yatay kuvvet — LOCAL Doğu yönü -->
+    <force name="force_east" frame="LOCAL">
+      <location unit="M"><x>0</x><y>0</y><z>0</z></location>
+      <direction><x>0</x><y>1</y><z>0</z></direction>
+    </force>
+
+  </external_reactions>
+
+</fdm_config>
